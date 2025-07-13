@@ -2,19 +2,23 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
 	"sync"
 	"time"
 	"crypto/tls"
 	"net"
-	// "strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 )
+
+//go:embed frontend/*
+var frontendFiles embed.FS
 
 type Service struct {
 	ID        string    `json:"id"`
@@ -223,6 +227,13 @@ func main() {
 	e := echo.New()
 	e.Use(middleware.CORS())
 	e.Use(middleware.Logger())
+
+
+	frontendContent, err := fs.Sub(frontendFiles, "frontend")
+	if err != nil {
+		log.Fatal(err)
+	}
+	e.GET("/*", echo.WrapHandler(http.FileServer(http.FS(frontendContent))))
 	
 	store := NewServiceStore()
 	broker := NewEventBroker()
@@ -242,7 +253,7 @@ func main() {
 		Type:     "tcp",
 	})
 	
-	checker := NewHealthChecker(store, broker, 30*time.Second)
+	checker := NewHealthChecker(store, broker, 2*time.Second)
 
 	go checker.Start()
 	defer checker.Stop()

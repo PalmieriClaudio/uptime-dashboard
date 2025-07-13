@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Service Status Dashboard</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .service {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .up { background-color: #e6f7e6; }
+        .down { background-color: #ffebeb; }
+        .unknown { background-color: #f5f5f5; }
+        .status {
+            font-weight: bold;
+            padding: 3px 8px;
+            border-radius: 3px;
+        }
+        .up .status { background-color: #4CAF50; color: white; }
+        .down .status { background-color: #f44336; color: white; }
+        .unknown .status { background-color: #9E9E9E; color: white; }
+        .latency { color: #666; }
+    </style>
+</head>
+<body>
+    <h1>Service Status Dashboard</h1>
+    <div id="services"></div>
+        <!-- <script> -->
+        <!--   const es = new EventSource('http://localhost:3030/api/events'); -->
+        <!---->
+        <!--   es.onopen = () => console.log("SSE Connected!"); -->
+        <!--   es.onmessage = e => console.log("Raw Event:", e.data); -->
+        <!--   es.onerror = e => console.error("SSE Error:", e); -->
+        <!---->
+        <!--   // Manual test -->
+        <!--   fetch('http://localhost:3030/api/services') -->
+        <!--     .then(r => r.json()) -->
+        <!--     .then(d => console.log("API Response:", d)); -->
+        <!-- </script> -->
+    <script>
+        // Initial load
+        fetch('http://localhost:3030/api/services')
+            .then(response => response.json())
+            .then(services => updateServices(services));
+
+        // Real-time updates
+        const eventSource = new EventSource('http://localhost:3030/api/events');
+        eventSource.onmessage = e => {
+            const service = JSON.parse(e.data);
+            updateService(service);
+        };
+
+        function updateServices(services) {
+            const container = document.getElementById('services');
+            container.innerHTML = '';
+            services.forEach(service => {
+                container.appendChild(createServiceElement(service));
+            });
+        }
+
+        function updateService(updatedService) {
+            const element = document.getElementById(`service-${updatedService.id}`);
+            if (element) {
+                element.replaceWith(createServiceElement(updatedService));
+            } else {
+                document.getElementById('services').appendChild(createServiceElement(updatedService));
+            }
+        }
+
+        function createServiceElement(service) {
+            const div = document.createElement('div');
+            div.className = `service ${service.status}`;
+            div.id = `service-${service.id}`;
+
+            div.innerHTML = `
+                <div>
+                    <h3>${service.name}</h3>
+                    <div>${service.endpoint} (${service.type})</div>
+                </div>
+                <div style="text-align: right;">
+                    <div class="status">${service.status.toUpperCase()}</div>
+                    <div class="latency">${service.latency}ms</div>
+                    <small>${new Date(service.checkedAt).toLocaleString()}</small>
+                </div>
+            `;
+
+            return div;
+        }
+    </script>
+</body>
+</html>
