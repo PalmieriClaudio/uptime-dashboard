@@ -2,6 +2,8 @@
 package main
 
 import (
+	"fmt"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"io/fs"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 //go:embed frontend/*
@@ -33,17 +36,53 @@ type Service struct {
 type ServiceStore struct {
 	mu       sync.RWMutex
 	services map[string]*Service
+	db       *sql.DB
 }
 
-func NewServiceStore() *ServiceStore {
-	return &ServiceStore{
+func NewServiceStore(db *sql.DB) *ServiceStore {
+	store := &ServiceStore{
 		services: make(map[string]*Service),
+		db:       db,
+	}
+	store.loadFromDB()
+	return store
+}
+
+func (s *ServiceStore) loadFromDB() {
+	rows, err := s.db.Query("SELECT id, name, endpoint, type, status, latency, checked_at FROM services")
+	if err != nil {
+		log.Printf("Error loading services: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var svc Service
+		err := rows.Scan(&svc.ID, &svc.Name, &svc.Endpoint, &svc.Type, &svc.Status, &svc.Latency, &svc.CheckedAt)
+		if err != nil {
+			log.Printf("Error scanning service: %v", err)
+			continue
+		}
+		s.services[svc.ID] = &svc
 	}
 }
 
 func (s *ServiceStore) AddService(service *Service) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO services 
+		(id, name, endpoint, type, status, latency, checked_at) 
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		service.ID, service.Name, service.Endpoint, service.Type, 
+		service.Status, service.Latency, service.CheckedAt)
+	
+	if err != nil {
+		log.Printf("Error saving service: %v", err)
+		return
+	}
+	
 	s.services[service.ID] = service
 }
 
@@ -59,10 +98,10 @@ func (s *ServiceStore) GetAll() []*Service {
 }
 
 func (s *ServiceStore) GetByID(id string) (*Service, bool) {
-  s.mu.RLock()
-  defer s.mu.RUnlock()
-  svc, exists := s.services[id]
-  return svc, exists
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	svc, exists := s.services[id]
+	return svc, exists
 }
 
 func (s *ServiceStore) UpdateStatus(id, status string, latency int) bool {
@@ -73,9 +112,33 @@ func (s *ServiceStore) UpdateStatus(id, status string, latency int) bool {
 		service.Status = status
 		service.Latency = latency
 		service.CheckedAt = time.Now()
+		
+		_, err := s.db.Exec(`
+			UPDATE services SET 
+			status = ?, 
+			latency = ?, 
+			checked_at = ? 
+			WHERE id = ?`,
+			status, latency, time.Now(), id)
+		
+		if err != nil {
+			log.Printf("Error updating status: %v", err)
+		}
 		return true
 	}
 	return false
+}
+
+func (s *ServiceStore) DeleteService(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	_, err := s.db.Exec("DELETE FROM services WHERE id = ?", id)
+	if err != nil {
+		log.Printf("Error deleting service: %v", err)
+	}
+	
+	delete(s.services, id)
 }
 
 type HealthChecker struct {
@@ -124,8 +187,7 @@ func (hc *HealthChecker) Stop() {
 }
 
 func (hc *HealthChecker) checkService(service *Service) {
-	// start := time.Now()
-  status, latency := "unknown", 0
+	status, latency := "unknown", 0
 
 	switch strings.ToLower(service.Type) {
 	case "http", "https":
@@ -138,12 +200,12 @@ func (hc *HealthChecker) checkService(service *Service) {
 	}
 
 	if hc.store.UpdateStatus(service.ID, status, latency) {
-    if updated, exists := hc.store.GetByID(service.ID); exists {
-      if data, err := json.Marshal(updated); err == nil {
-        hc.broker.Publish(data)
-      }
-    }
-  }
+		if updated, exists := hc.store.GetByID(service.ID); exists {
+			if data, err := json.Marshal(updated); err == nil {
+				hc.broker.Publish(data)
+			}
+		}
+	}
 }
 
 func (hc *HealthChecker) checkHTTP(url string) (string, int) {
@@ -181,7 +243,6 @@ func (hc *HealthChecker) checkTCP(endpoint string) (string, int) {
 	return "up", latency
 }
 
-// EventBroker manages real-time client connections
 type EventBroker struct {
 	mu          sync.Mutex
 	subscribers map[chan []byte]struct{}
@@ -224,10 +285,32 @@ func (b *EventBroker) Publish(data []byte) {
 }
 
 func main() {
+	// Initialize SQLite database
+	db, err := sql.Open("sqlite3", "./services.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	// Create services table if not exists
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS services (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			endpoint TEXT NOT NULL,
+			type TEXT NOT NULL,
+			status TEXT,
+			latency INTEGER,
+			checked_at DATETIME
+		)
+	`)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	e := echo.New()
 	e.Use(middleware.CORS())
 	e.Use(middleware.Logger())
-
 
 	frontendContent, err := fs.Sub(frontendFiles, "frontend")
 	if err != nil {
@@ -235,32 +318,89 @@ func main() {
 	}
 	e.GET("/*", echo.WrapHandler(http.FileServer(http.FS(frontendContent))))
 	
-	store := NewServiceStore()
+	store := NewServiceStore(db)
 	broker := NewEventBroker()
-	
-	store.AddService(&Service{ID: "1", Name: "Jellyfin", Endpoint: "http://127.0.0.1:8096", Type: "http"})
-	store.AddService(&Service{
-		ID:       "2",
-		Name:     "Google",
-		Endpoint: "https://www.google.com",
-		Type:     "https",
-	})
-	
-	store.AddService(&Service{
-		ID:       "3",
-		Name:     "Cloudflare DNS",
-		Endpoint: "1.1.1.1:53",
-		Type:     "tcp",
-	})
+
+	// Only add default services if DB is empty
+	if len(store.GetAll()) == 0 {
+		store.AddService(&Service{
+			ID:       "1",
+			Name:     "Jellyfin",
+			Endpoint: "http://127.0.0.1:8096",
+			Type:     "http",
+		})
+		store.AddService(&Service{
+			ID:       "2",
+			Name:     "Google",
+			Endpoint: "https://www.google.com",
+			Type:     "https",
+		})
+		store.AddService(&Service{
+			ID:       "3",
+			Name:     "Cloudflare DNS",
+			Endpoint: "1.1.1.1:53",
+			Type:     "tcp",
+		})
+	}
 	
 	checker := NewHealthChecker(store, broker, 2*time.Second)
-
 	go checker.Start()
 	defer checker.Stop()
 	
 	// API Endpoints
 	e.GET("/api/services", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, store.GetAll())
+	})
+	
+	e.POST("/api/services", func(c echo.Context) error {
+		var newService Service
+		if err := c.Bind(&newService); err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request"})
+		}
+		
+		if newService.ID == "" {
+			newService.ID = generateUUID() 
+		}
+		
+		store.AddService(&newService)
+		go checker.checkService(&newService)
+		
+		return c.JSON(http.StatusCreated, newService)
+	})
+
+	e.GET("/api/services/:id", func(c echo.Context) error {
+    id := c.Param("id")
+    if svc, exists := store.GetByID(id); exists {
+        return c.JSON(http.StatusOK, svc)
+    }
+    return c.JSON(http.StatusNotFound, map[string]string{"error": "Service not found"})
+	})
+
+	e.PUT("/api/services/:id", func(c echo.Context) error {
+		id := c.Param("id")
+		var updatedService Service
+		if err := c.Bind(&updatedService); err != nil {
+			return err
+		}
+		
+		if existing, ok := store.GetByID(id); ok {
+			existing.Name = updatedService.Name
+			existing.Endpoint = updatedService.Endpoint
+			existing.Type = updatedService.Type
+			store.AddService(existing) 
+			go checker.checkService(existing)
+			return c.JSON(http.StatusOK, existing)
+		}
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Service not found"})
+	})
+	
+	e.DELETE("/api/services/:id", func(c echo.Context) error {
+		id := c.Param("id")
+		if _, ok := store.GetByID(id); ok {
+			store.DeleteService(id)
+			return c.NoContent(http.StatusNoContent)
+		}
+		return c.JSON(http.StatusNotFound, map[string]string{"error": "Service not found"})
 	})
 	
 	e.GET("/api/events", func(c echo.Context) error {
@@ -291,6 +431,9 @@ func main() {
 		}
 	})
 	
-	// Start API server
 	log.Fatal(e.Start(":3030"))
+}
+
+func generateUUID() string {
+	return fmt.Sprintf("%x", time.Now().UnixNano()) // This is not good enough but will do for a local dashboard with one user at a time.
 }

@@ -1,13 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Service Status Dashboard</title>
     <style>
         body {
             font-family: Arial, sans-serif;
-            max-width: 800px;
+            max-width: 1000px;
             margin: 0 auto;
             padding: 20px;
         }
@@ -18,6 +18,7 @@
             margin-bottom: 10px;
             display: flex;
             justify-content: space-between;
+            position: relative;
         }
         .up { background-color: #e6f7e6; }
         .down { background-color: #ffebeb; }
@@ -26,33 +27,113 @@
             font-weight: bold;
             padding: 3px 8px;
             border-radius: 3px;
+            margin-bottom: 5px;
         }
-        .up .status { background-color: #4CAF50; color: white; }
+        .up .status { background-color: #4caf50; color: white; }
         .down .status { background-color: #f44336; color: white; }
-        .unknown .status { background-color: #9E9E9E; color: white; }
-        .latency { color: #666; }
+        .unknown .status { background-color: #9e9e9e; color: white; }
+        .latency { color: #666; font-size: 0.9em; }
+        .checked-at { color: #666; font-size: 0.8em; }
+        
+        /* Service Form Styles */
+        .service-form {
+            background: #f8f8f8;
+            padding: 20px;
+            margin-bottom: 30px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 8px 15px;
+            margin-right: 10px;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+        }
+        .btn-primary {
+            background: #4caf50;
+            color: white;
+        }
+        .btn-secondary {
+            background: #607d8b;
+            color: white;
+        }
+        .btn-danger {
+            background: #f44336;
+            color: white;
+        }
+        
+        /* Action buttons inside service cards */
+        .service-actions {
+            display: flex;
+            gap: 5px;
+            margin-top: 10px;
+        }
+        .service-actions button {
+            padding: 3px 8px;
+            font-size: 12px;
+            margin: 0;
+        }
+        .service-details {
+            flex-grow: 1;
+        }
+        .service-status {
+            text-align: right;
+            min-width: 120px;
+        }
     </style>
 </head>
 <body>
     <h1>Service Status Dashboard</h1>
+    
+    <div class="service-form">
+        <h2>Manage Services</h2>
+        <form id="serviceForm">
+            <input type="hidden" id="serviceId">
+            <div class="form-group">
+                <label for="serviceName">Name:</label>
+                <input type="text" id="serviceName" required>
+            </div>
+            <div class="form-group">
+                <label for="serviceEndpoint">Endpoint:</label>
+                <input type="text" id="serviceEndpoint" required>
+            </div>
+            <div class="form-group">
+                <label for="serviceType">Type:</label>
+                <select id="serviceType" required>
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
+                    <option value="tcp">TCP</option>
+                </select>
+            </div>
+            <button type="submit" class="btn-primary">Save Service</button>
+            <button type="button" id="cancelEdit" class="btn-secondary">Cancel</button>
+        </form>
+    </div>
+    
     <div id="services"></div>
-        <!-- <script> -->
-        <!--   const es = new EventSource('http://localhost:3030/api/events'); -->
-        <!---->
-        <!--   es.onopen = () => console.log("SSE Connected!"); -->
-        <!--   es.onmessage = e => console.log("Raw Event:", e.data); -->
-        <!--   es.onerror = e => console.error("SSE Error:", e); -->
-        <!---->
-        <!--   // Manual test -->
-        <!--   fetch('http://localhost:3030/api/services') -->
-        <!--     .then(r => r.json()) -->
-        <!--     .then(d => console.log("API Response:", d)); -->
-        <!-- </script> -->
+
     <script>
         // Initial load
         fetch('http://localhost:3030/api/services')
             .then(response => response.json())
-            .then(services => updateServices(services));
+            .then(services => updateServices(services))
+            .catch(err => console.error('Error loading services:', err));
 
         // Real-time updates
         const eventSource = new EventSource('http://localhost:3030/api/events');
@@ -60,6 +141,49 @@
             const service = JSON.parse(e.data);
             updateService(service);
         };
+        eventSource.onerror = e => {
+            console.error('SSE Error:', e);
+        };
+
+        // Form handling
+        const serviceForm = document.getElementById('serviceForm');
+        const cancelBtn = document.getElementById('cancelEdit');
+        let editingId = null;
+
+        serviceForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const service = {
+                id: document.getElementById('serviceId').value || undefined,
+                name: document.getElementById('serviceName').value,
+                endpoint: document.getElementById('serviceEndpoint').value,
+                type: document.getElementById('serviceType').value
+            };
+
+            const method = editingId ? 'PUT' : 'POST';
+            const url = editingId ? `/api/services/${editingId}` : '/api/services';
+
+            try {
+                const response = await fetch(url, {
+                    method,
+                    headers: { 
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(service)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                resetForm();
+            } catch (error) {
+                console.error('Error saving service:', error);
+                alert('Failed to save service. Check console for details.');
+            }
+        });
+
+        cancelBtn.addEventListener('click', resetForm);
 
         function updateServices(services) {
             const container = document.getElementById('services');
@@ -84,18 +208,69 @@
             div.id = `service-${service.id}`;
 
             div.innerHTML = `
-                <div>
+                <div class="service-details">
                     <h3>${service.name}</h3>
                     <div>${service.endpoint} (${service.type})</div>
+                    <div class="service-actions">
+                        <button class="btn-secondary edit-btn" data-id="${service.id}">Edit</button>
+                        <button class="btn-danger delete-btn" data-id="${service.id}">Delete</button>
+                    </div>
                 </div>
-                <div style="text-align: right;">
+                <div class="service-status">
                     <div class="status">${service.status.toUpperCase()}</div>
                     <div class="latency">${service.latency}ms</div>
-                    <small>${new Date(service.checkedAt).toLocaleString()}</small>
+                    <div class="checked-at">${new Date(service.checkedAt).toLocaleString()}</div>
                 </div>
             `;
 
+            // Add event listeners
+            div.querySelector('.edit-btn').addEventListener('click', () => editService(service.id));
+            div.querySelector('.delete-btn').addEventListener('click', () => deleteService(service.id));
+
             return div;
+        }
+
+        async function editService(id) {
+            try {
+                const response = await fetch(`/api/services/${id}`);
+                if (!response.ok) throw new Error('Service not found');
+                
+                const service = await response.json();
+                
+                document.getElementById('serviceId').value = service.id;
+                document.getElementById('serviceName').value = service.name;
+                document.getElementById('serviceEndpoint').value = service.endpoint;
+                document.getElementById('serviceType').value = service.type;
+                
+                editingId = id;
+                document.getElementById('serviceName').focus();
+            } catch (error) {
+                console.error('Error fetching service:', error);
+                alert('Failed to load service for editing');
+            }
+        }
+
+        async function deleteService(id) {
+            if (!confirm('Are you sure you want to delete this service?')) return;
+            
+            try {
+                const response = await fetch(`/api/services/${id}`, {
+                    method: 'DELETE'
+                });
+                
+                if (!response.ok) throw new Error('Failed to delete');
+                
+                document.getElementById(`service-${id}`)?.remove();
+            } catch (error) {
+                console.error('Error deleting service:', error);
+                alert('Failed to delete service');
+            }
+        }
+
+        function resetForm() {
+            serviceForm.reset();
+            editingId = null;
+            document.getElementById('serviceId').value = '';
         }
     </script>
 </body>
