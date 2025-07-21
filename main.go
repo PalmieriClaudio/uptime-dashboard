@@ -105,28 +105,29 @@ func (s *ServiceStore) GetByID(id string) (*Service, bool) {
 }
 
 func (s *ServiceStore) UpdateStatus(id, status string, latency int) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	
-	if service, exists := s.services[id]; exists {
-		service.Status = status
-		service.Latency = latency
-		service.CheckedAt = time.Now()
-		
-		_, err := s.db.Exec(`
-			UPDATE services SET 
-			status = ?, 
-			latency = ?, 
-			checked_at = ? 
-			WHERE id = ?`,
-			status, latency, time.Now(), id)
-		
-		if err != nil {
-			log.Printf("Error updating status: %v", err)
-		}
-		return true
-	}
-	return false
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    
+    if service, exists := s.services[id]; exists {
+      // Update current status
+      service.Status = status
+      service.Latency = latency
+      service.CheckedAt = time.Now()
+      
+      // Record history
+      _, err := s.db.Exec(`
+        INSERT INTO service_history 
+        (service_id, status, latency, checked_at)
+        VALUES (?, ?, ?, ?)`,
+        id, status, latency, time.Now())
+      
+      if err != nil {
+        log.Printf("Error saving history: %v", err)
+      }
+      
+      return true
+    }
+    return false
 }
 
 func (s *ServiceStore) DeleteService(id string) {
@@ -307,6 +308,21 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	_, err = db.Exec(`
+    CREATE TABLE IF NOT EXISTS service_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        service_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        latency INTEGER NOT NULL,
+        checked_at DATETIME NOT NULL,
+        FOREIGN KEY(service_id) REFERENCES services(id)
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_service_history ON service_history(service_id, checked_at);
+	`)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	e := echo.New()
 	e.Use(middleware.CORS())
@@ -430,6 +446,47 @@ func main() {
 			}
 		}
 	})
+
+	e.GET("/api/services/:id/history", func(c echo.Context) error {
+    id := c.Param("id")
+    hours := c.QueryParam("hours")
+    if hours == "" {
+      hours = "24" // Default to 24 hours
+    }
+    
+    rows, err := db.Query(`
+      SELECT status, latency, checked_at 
+      FROM service_history 
+      WHERE service_id = ? 
+      AND checked_at >= datetime('now', ? || ' hours')
+      ORDER BY checked_at`,
+      id, "-"+hours)
+    
+    if err != nil {
+      return err
+    }
+    defer rows.Close()
+    
+    var history []map[string]interface{}
+    for rows.Next() {
+      var status string
+      var latency int
+      var checkedAt time.Time
+      
+      err := rows.Scan(&status, &latency, &checkedAt)
+      if err != nil {
+        continue
+      }
+      
+      history = append(history, map[string]interface{}{
+        "status":    status,
+        "latency":   latency,
+        "checkedAt": checkedAt.Format(time.RFC3339),
+      })
+    }
+    
+    return c.JSON(http.StatusOK, history)
+})
 	
 	log.Fatal(e.Start(":3030"))
 }
