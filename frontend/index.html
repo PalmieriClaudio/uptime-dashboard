@@ -347,6 +347,14 @@
         let serviceHistory = [];
         let eventSource;
         let chartUpdateInterval;
+        let statusChartUpdateInterval;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initEventSource();
+            loadServices();
+            setupEventListeners();
+            setupTabNavigation();
+        });
 
         document.addEventListener('DOMContentLoaded', () => {
             initEventSource();
@@ -491,11 +499,84 @@
             
             // Set up periodic refresh when viewing analytics
             clearInterval(chartUpdateInterval);
+            clearInterval(statusChartUpdateInterval);
+            
             if (document.getElementById('analytics-view').classList.contains('active')) {
                 chartUpdateInterval = setInterval(() => {
                     loadServiceHistory(serviceId);
-                }, 30000); // Refresh every 30 seconds
+                }, 30000); // Refresh all data every 30 seconds
+                
+                // More frequent updates for the current period in status timeline
+                statusChartUpdateInterval = setInterval(() => {
+                    if (statusChart) {
+                        updateStatusChartCurrentPeriod();
+                    }
+                }, 5000); // Update current period every 5 seconds
             }
+        }
+
+        function updateStatusChartCurrentPeriod() {
+            if (!serviceHistory.length || !statusChart) return;
+            
+            const lastItem = serviceHistory[serviceHistory.length - 1];
+            const now = new Date();
+            const currentDuration = (now - new Date(lastItem.checkedAt)) / (1000 * 60); // in minutes
+            
+            // Update only the last data point (current period)
+            const data = statusChart.data.datasets[0].data;
+            if (data.length > 0) {
+                data[data.length - 1] = Math.max(1, currentDuration.toFixed(1));
+                statusChart.update();
+            }
+        }
+
+        function prepareStatusData() {
+            if (serviceHistory.length < 1) {
+                return { labels: [], values: [], colors: [] };
+            }
+
+            const statusChanges = [];
+            let currentStatus = serviceHistory[0].status;
+            let startTime = new Date(serviceHistory[0].checkedAt);
+            
+            // Process all historical status changes
+            for (let i = 1; i < serviceHistory.length; i++) {
+                const item = serviceHistory[i];
+                if (item.status !== currentStatus) {
+                    const endTime = new Date(item.checkedAt);
+                    const duration = (endTime - startTime) / (1000 * 60); // in minutes
+                    
+                    if (duration > 0) {
+                        statusChanges.push({
+                            status: currentStatus,
+                            duration,
+                            startTime,
+                            endTime
+                        });
+                    }
+                    
+                    currentStatus = item.status;
+                    startTime = endTime;
+                }
+            }
+            
+            // Add the current period (from last check to now)
+            const lastItem = serviceHistory[serviceHistory.length - 1];
+            const currentDuration = (new Date() - new Date(lastItem.checkedAt)) / (1000 * 60);
+            statusChanges.push({
+                status: lastItem.status,
+                duration: currentDuration,
+                startTime: new Date(lastItem.checkedAt),
+                endTime: new Date()
+            });
+            
+            const labels = statusChanges.map((_, i) => 
+                i === statusChanges.length - 1 ? 'Current' : `Period ${i + 1}`);
+            const values = statusChanges.map(change => Math.max(0.1, change.duration.toFixed(1)));
+            const colors = statusChanges.map(change => 
+                change.status === 'up' ? '#4CAF50' : '#F44336');
+            
+            return { labels, values, colors };
         }
 
         async function loadServiceHistory(serviceId) {
@@ -843,6 +924,7 @@
             
             showNoDataMessages();
             clearInterval(chartUpdateInterval);
+            clearInterval(statusChartUpdateInterval);
         }
 
         function showNoDataMessages() {
